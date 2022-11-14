@@ -33,7 +33,7 @@ from flask_wtf import CSRFProtect
 from changedetectionio import html_tools
 from changedetectionio.api import api_v1
 
-__version__ = '0.39.20.2'
+__version__ = '0.39.21.1'
 
 datastore = None
 
@@ -194,7 +194,8 @@ def changedetection_app(config=None, datastore_o=None):
     watch_api.add_resource(api_v1.Watch, '/api/v1/watch/<string:uuid>',
                            resource_class_kwargs={'datastore': datastore, 'update_q': update_q})
 
-
+    watch_api.add_resource(api_v1.SystemInfo, '/api/v1/systeminfo',
+                           resource_class_kwargs={'datastore': datastore, 'update_q': update_q})
 
 
 
@@ -598,7 +599,7 @@ def changedetection_app(config=None, datastore_o=None):
                     extra_update_obj['previous_md5'] = get_current_checksum_include_ignore_text(uuid=uuid)
 
             # Reset the previous_md5 so we process a new snapshot including stripping ignore text.
-            if form.css_filter.data.strip() != datastore.data['watching'][uuid]['css_filter']:
+            if form.include_filters.data != datastore.data['watching'][uuid].get('include_filters', []):
                 if len(datastore.data['watching'][uuid].history):
                     extra_update_obj['previous_md5'] = get_current_checksum_include_ignore_text(uuid=uuid)
 
@@ -816,8 +817,10 @@ def changedetection_app(config=None, datastore_o=None):
 
         newest_file = history[dates[-1]]
 
+        # Read as binary and force decode as UTF-8
+        # Windows may fail decode in python if we just use 'r' mode (chardet decode exception)
         try:
-            with open(newest_file, 'r') as f:
+            with open(newest_file, 'r', encoding='utf-8', errors='ignore') as f:
                 newest_version_file_contents = f.read()
         except Exception as e:
             newest_version_file_contents = "Unable to read {}.\n".format(newest_file)
@@ -830,7 +833,7 @@ def changedetection_app(config=None, datastore_o=None):
             previous_file = history[dates[-2]]
 
         try:
-            with open(previous_file, 'r') as f:
+            with open(previous_file, 'r', encoding='utf-8', errors='ignore') as f:
                 previous_version_file_contents = f.read()
         except Exception as e:
             previous_version_file_contents = "Unable to read {}.\n".format(previous_file)
@@ -907,7 +910,7 @@ def changedetection_app(config=None, datastore_o=None):
         timestamp = list(watch.history.keys())[-1]
         filename = watch.history[timestamp]
         try:
-            with open(filename, 'r') as f:
+            with open(filename, 'r', encoding='utf-8', errors='ignore') as f:
                 tmp = f.readlines()
 
                 # Get what needs to be highlighted
@@ -982,9 +985,6 @@ def changedetection_app(config=None, datastore_o=None):
 
         # create a ZipFile object
         backupname = "changedetection-backup-{}.zip".format(int(time.time()))
-
-        # We only care about UUIDS from the current index file
-        uuids = list(datastore.data['watching'].keys())
         backup_filepath = os.path.join(datastore_o.datastore_path, backupname)
 
         with zipfile.ZipFile(backup_filepath, "w",
@@ -1000,12 +1000,12 @@ def changedetection_app(config=None, datastore_o=None):
             # Add the flask app secret
             zipObj.write(os.path.join(datastore_o.datastore_path, "secret.txt"), arcname="secret.txt")
 
-            # Add any snapshot data we find, use the full path to access the file, but make the file 'relative' in the Zip.
-            for txt_file_path in Path(datastore_o.datastore_path).rglob('*.txt'):
-                parent_p = txt_file_path.parent
-                if parent_p.name in uuids:
-                    zipObj.write(txt_file_path,
-                                 arcname=str(txt_file_path).replace(datastore_o.datastore_path, ''),
+            # Add any data in the watch data directory.
+            for uuid, w in datastore.data['watching'].items():
+                for f in Path(w.watch_data_dir).glob('*'):
+                    zipObj.write(f,
+                                 # Use the full path to access the file, but make the file 'relative' in the Zip.
+                                 arcname=os.path.join(f.parts[-2], f.parts[-1]),
                                  compress_type=zipfile.ZIP_DEFLATED,
                                  compresslevel=8)
 
@@ -1307,8 +1307,8 @@ def changedetection_app(config=None, datastore_o=None):
 
     threading.Thread(target=notification_runner).start()
 
-    # Check for new release version, but not when running in test/build
-    if not os.getenv("GITHUB_REF", False):
+    # Check for new release version, but not when running in test/build or pytest
+    if not os.getenv("GITHUB_REF", False) and not config.get('disable_checkver') == True:
         threading.Thread(target=check_for_new_version).start()
 
     return app
